@@ -51,11 +51,19 @@ describe('a folder on disk, when a file is held by another program', () => {
     expect(n.refused).toBe(1); expect(f.read('ops.json')).toBe('{"new":2}'); expect(fs.readdirSync(dir)).toEqual(['ops.json']);
   });
 
-  it('the working copy and the rename share one wait: a journal write holds the process for one wait in all', () => {
-    const dir = tmp(); const f = nodeFolder(dir, [20, 20, 20]); f.write('ops.json', '{"old":1}'); let left = 2;
-    const w = lock('writeFileSync', 'ops.json.tmp', 'EBUSY', () => left-- > 0); const r = lock('renameSync', 'ops.json', 'EPERM', () => true);
-    const at = Date.now(); expect(() => f.write('ops.json', '{"new":2}')).toThrow(/EPERM/);
-    expect(w.tried).toBe(3); expect(r.tried).toBe(2); expect(Date.now() - at).toBeLessThan(110);    // 2 waits for the working copy, the last 1 for the rename
+  it('shares one retry budget between writing and renaming the working copy', () => {
+    const dir = tmp();
+    const folder = nodeFolder(dir, [10, 20, 30]);
+    folder.write('ops.json', '{"old":1}');
+    let writesToRefuse = 2;
+    const writes = lock('writeFileSync', 'ops.json.tmp', 'EBUSY', () => writesToRefuse-- > 0);
+    const renames = lock('renameSync', 'ops.json', 'EPERM', () => true);
+    const wait = vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out');
+
+    expect(() => folder.write('ops.json', '{"new":2}')).toThrow(/EPERM/);
+    expect(writes.tried).toBe(3);
+    expect(renames.tried).toBe(2);
+    expect(wait.mock.calls.map(([, , , timeout]) => timeout)).toEqual([10, 20, 30]);
   });
 
   it('a file written whole is forced to the disk before it replaces the old one, so a power cut leaves one or the other', () => {
